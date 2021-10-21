@@ -1,17 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
-	"net/http"
+	"net"
 	"os"
+	"strconv"
 	"time"
-
+    "fmt"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 )
 
@@ -38,6 +39,7 @@ func generateBlock(oldBlock Block,BPM int) (Block,error) {
     t:=time.Now()
     newBlock.Index=oldBlock.Index+1
     newBlock.Timestamp=t.String()
+    newBlock.BPM=BPM
     newBlock.PrevHash=oldBlock.Hash
     newBlock.Hash=calculateHash(newBlock)
     return newBlock,nil
@@ -61,87 +63,66 @@ func replaceChain(newBlocks []Block) {
         BlockChain=newBlocks
     }
 }
-
-//Http Server
-type Message struct {
-    BPM int
-}
-
-func makeMuxRouter() http.Handler {
-    muxRouter:=mux.NewRouter()
-    muxRouter.HandleFunc("/",hanldeGetBlockchain).Methods("GET")
-    muxRouter.HandleFunc("/",handleWriteBlock).Methods("POST")
-    return muxRouter
-}
-
-func respondWithJson(w http.ResponseWriter,r *http.Request,code int,payload interface{}) {
-    response,err:=json.MarshalIndent(payload,"" ," ")
-    if err!=nil {
-        w.WriteHeader(http.StatusInternalServerError)
-        w.Write([]byte("HTTP 500: Internal Server Error"))
-        return
-    }
-    w.WriteHeader(code)
-    w.Write(response)
-}
-
-func hanldeGetBlockchain(w http.ResponseWriter,r *http.Request) {
-    bytes,err:=json.MarshalIndent(BlockChain,""," ")
-    if err!=nil {
-        http.Error(w,err.Error(),http.StatusInternalServerError)
-        return
-        
-    }
-    io.WriteString(w,string(bytes))
-}
-
-func handleWriteBlock(w http.ResponseWriter,r *http.Request) {
-    var m Message
-    decoder:=json.NewDecoder(r.Body)
-    if err:=decoder.Decode(&m);err!=nil {
-        respondWithJson(w,r,http.StatusBadRequest,r.Body)
-    }
-    defer r.Body.Close()
-    newBlock,err:=generateBlock(BlockChain[len(BlockChain)-1],m.BPM)
-    if err!=nil {
-        respondWithJson(w,r,http.StatusInternalServerError,m)
-        return
-    }
-    if isBlockValid(newBlock,BlockChain[len(BlockChain)-1]) {
-        newBlockChain:=append(BlockChain,newBlock)
-        replaceChain(newBlockChain)
-        spew.Dump(BlockChain)
-    }
-    respondWithJson(w,r,http.StatusCreated,newBlock)
-}
-func run() error {
-    mux:=makeMuxRouter()
-    httpAddr:=os.Getenv("PORT")
-    log.Println("Listening on",os.Getenv("PORT"))
-    s := &http.Server{
-		Addr:           ":" + httpAddr,
-		Handler:        mux,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
-		MaxHeaderBytes: 1 << 20,
-	}
-	if err:=s.ListenAndServe(); err!=nil {
-	    return err
-	}
-	return nil
-}
-
-func main() {
-    err := godotenv.Load()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	go func() {
-		t := time.Now()
-		genesisBlock := Block{0, t.String(), 0, "", ""}
-		spew.Dump(genesisBlock)
-		BlockChain = append(BlockChain, genesisBlock)
+func handleConn(conn net.Conn) {
+    defer conn.Close()
+    io.WriteString(conn,"Enter BPM: ")
+    scanner:=bufio.NewScanner(conn)
+    go func() {
+        for scanner.Scan() {
+            bpm,err:=strconv.Atoi(scanner.Text())
+            fmt.Println(bpm)
+            if err!=nil {
+                log.Printf("%v: Not a number %v",scanner.Text(),err)
+                continue
+            }
+            
+            newBlock,err:=generateBlock(BlockChain[len(BlockChain)-1],bpm)
+            if err!=nil {
+                log.Fatal(err)
+            }
+            if isBlockValid(newBlock,BlockChain[len(BlockChain)-1]) {
+                newBlockChain:=append(BlockChain,newBlock)
+                replaceChain(newBlockChain)
+            }
+            bcServer <- BlockChain
+            io.WriteString(conn,"\nEnter new BPM: ")
+        }
+    }()
+    go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			output, err := json.Marshal(BlockChain)
+			if err != nil {
+				log.Fatal(err)
+			}
+			io.WriteString(conn, string(output))
+		}
 	}()
-	log.Fatal(run())
+	for _ = range bcServer {
+		spew.Dump(BlockChain)
+	}
+}
+var bcServer chan []Block
+func main() {
+    err:=godotenv.Load()
+    if err!=nil {
+        log.Fatal(err)
+    }
+    bcServer=make(chan []Block)
+    t:=time.Now()
+    genesisBlock:=Block{0,t.String(),0,"",""}
+    spew.Dump(genesisBlock)
+    BlockChain=append(BlockChain,genesisBlock)
+    server,err:=net.Listen("tcp",":"+os.Getenv("PORT"))
+    if err!=nil {
+        log.Fatal(err)
+    }
+    defer server.Close()
+    for {
+        conn,err:=server.Accept()
+        if err!=nil {
+            log.Fatal(err)
+        }
+        go handleConn(conn)
+    }
 }
