@@ -1,2 +1,2 @@
 # Insedhuma Network
-A toy cryptocurrency built in golang
+A toy blockchain program for a decentralised internet 
